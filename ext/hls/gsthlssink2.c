@@ -40,6 +40,7 @@
 #include <glib/gstdio.h>
 #include <memory.h>
 
+#include "m3u8.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_hls_sink2_debug);
 #define GST_CAT_DEFAULT gst_hls_sink2_debug
@@ -50,6 +51,7 @@ GST_DEBUG_CATEGORY_STATIC (gst_hls_sink2_debug);
 #define DEFAULT_MAX_FILES 10
 #define DEFAULT_TARGET_DURATION 15
 #define DEFAULT_PLAYLIST_LENGTH 5
+#define DEFAULT_APPEND_LIST FALSE
 
 #define GST_M3U8_PLAYLIST_VERSION 3
 
@@ -61,7 +63,8 @@ enum
   PROP_PLAYLIST_ROOT,
   PROP_MAX_FILES,
   PROP_TARGET_DURATION,
-  PROP_PLAYLIST_LENGTH
+  PROP_PLAYLIST_LENGTH,
+  PROP_APPEND_LIST
 };
 
 static GstStaticPadTemplate video_template = GST_STATIC_PAD_TEMPLATE ("video",
@@ -177,7 +180,23 @@ gst_hls_sink2_class_init (GstHlsSink2Class * klass)
           "the playlist will be infinite.",
           0, G_MAXUINT, DEFAULT_PLAYLIST_LENGTH,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class, PROP_APPEND_LIST,
+      g_param_spec_boolean ("append-list", "Append List",
+          "append the new segments into old hls segment list",
+          DEFAULT_APPEND_LIST, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
+
+static gchar *
+on_next_sequence_file_name (GstElement * splitmuxsink, guint fragment_id,
+    gpointer user_data)
+{
+  gchar *fname = NULL;
+  GstHlsSink2 *sink = user_data;
+
+  fname = sink->location ? g_strdup_printf (sink->location, sink->index) : NULL;
+
+  return fname;
+ }
 
 static void
 gst_hls_sink2_init (GstHlsSink2 * sink)
@@ -190,10 +209,14 @@ gst_hls_sink2_init (GstHlsSink2 * sink)
   sink->playlist_length = DEFAULT_PLAYLIST_LENGTH;
   sink->max_files = DEFAULT_MAX_FILES;
   sink->target_duration = DEFAULT_TARGET_DURATION;
+  sink->append_list = DEFAULT_APPEND_LIST;
   g_queue_init (&sink->old_locations);
 
   sink->splitmuxsink = gst_element_factory_make ("splitmuxsink", NULL);
   gst_bin_add (GST_BIN (sink), sink->splitmuxsink);
+
+  g_signal_connect (sink->splitmuxsink, "format-location",
+      G_CALLBACK (on_next_sequence_file_name), sink);
 
   mux = gst_element_factory_make ("mpegtsmux", NULL);
   g_object_set (sink->splitmuxsink, "location", sink->location, "max-size-time",
@@ -203,6 +226,43 @@ gst_hls_sink2_init (GstHlsSink2 * sink)
   GST_OBJECT_FLAG_SET (sink, GST_ELEMENT_FLAG_SINK);
 
   gst_hls_sink2_reset (sink);
+}
+
+static void
+gst_hls_parse_playlist (GstHlsSink2 * sink)
+{
+  GstM3U8 *m3u8 = gst_m3u8_new ();
+  gchar *data;
+  gsize size;
+
+  if (g_file_test (sink->playlist_location, G_FILE_TEST_EXISTS)) {
+    if (!g_file_get_contents (sink->playlist_location, &data, &size, NULL)) {
+      GST_WARNING_OBJECT (sink, "Failed to read %s file",
+          sink->playlist_location);
+      return;
+    }
+
+    GST_DEBUG_OBJECT (sink, "read %s, contents: \n%s", sink->playlist_location,
+        data);
+
+    /* Need to uri path include '/' as last character for url_join in
+     * gst_m3u8_update(). If the path is used without '/', the segment files
+     * created in previous execution could not be updated into GstM3U8 data
+     * structure. Set temporarily "./" path to parse m3u8 file.
+     */
+    gst_m3u8_set_uri (m3u8, "./", NULL, NULL);
+
+    if (!gst_m3u8_update (m3u8, data)) {
+      GST_WARNING ("Failed to parse media playlist");
+      gst_m3u8_unref (m3u8);
+      return;
+    }
+
+    GST_DEBUG_OBJECT (sink, "updated index to %ld", m3u8->sequence);
+    sink->index = m3u8->sequence + 1;
+
+    gst_m3u8_unref (m3u8);
+  }
 }
 
 static void
@@ -377,6 +437,9 @@ gst_hls_sink2_change_state (GstElement * element, GstStateChange trans)
       if (!sink->splitmuxsink) {
         return GST_STATE_CHANGE_FAILURE;
       }
+      if (sink->append_list) {
+        gst_hls_parse_playlist (sink);
+      }
       break;
     default:
       break;
@@ -433,6 +496,9 @@ gst_hls_sink2_set_property (GObject * object, guint prop_id,
       sink->playlist_length = g_value_get_uint (value);
       sink->playlist->window_size = sink->playlist_length;
       break;
+    case PROP_APPEND_LIST:
+      sink->append_list = g_value_get_boolean (value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -463,6 +529,9 @@ gst_hls_sink2_get_property (GObject * object, guint prop_id,
       break;
     case PROP_PLAYLIST_LENGTH:
       g_value_set_uint (value, sink->playlist_length);
+      break;
+    case PROP_APPEND_LIST:
+      g_value_set_boolean (value, sink->append_list);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
