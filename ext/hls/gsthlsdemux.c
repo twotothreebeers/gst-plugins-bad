@@ -203,7 +203,8 @@ gst_hls_demux_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
-      gst_hls_demux_reset (GST_ADAPTIVE_DEMUX_CAST (demux));
+      g_print("GST_STATE_CHANGE_READY_TO_PAUSED in HLSDEMUX!\n");
+      //gst_hls_demux_reset (GST_ADAPTIVE_DEMUX_CAST (demux));
       break;
     default:
       break;
